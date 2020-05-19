@@ -8,6 +8,6 @@ The circuit is implemented as a AXI4 master IP. Verilog and Xilinx Vivado 2018.2
 In the provided workspace, a Microbalze processor is used to run the image pyramid generating software to control the image down-scaling accelerator. The sample system reads an 640x480 input image through the UART port and prints the output image to the UART port. You can enable the loggin function of your terminal emulator (Teraterm Pro in our case) to save the output image(s) to a file. An offline tool can be used to convert the logged images to PGM images for verification.
 
 # Contact Info
-Embedded Intelligent Systems Lab (EISL)
-Department of Computer Science
-National Chiao Tung University
+Embedded Intelligent Systems Lab (EISL)  
+Department of Computer Science  
+National Chiao Tung University  
