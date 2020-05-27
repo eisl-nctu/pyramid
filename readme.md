@@ -5,8 +5,7 @@ In this project, we present an image pyramid accelerator for embedded processors
 # Specification
 The circuit is implemented as a AXI4 master IP. Verilog and Xilinx Vivado 2018.2 are used to develop the logic. The Xilinx KC-705 development board was used as the verification platform.
 
-A Vivado sample workspace can be downloaded from here. This workspace contains the test software (for Xilinx SDK) that
-uses a Microbalze processor to control the image down-scaling accelerator. The sample software reads an 640x480 input image through the UART port and prints the output image to the UART port. You can enable the logging function of your terminal emulator (Teraterm Pro in our case) to save the output image(s) to a file. An offline command-line tool, log2pgm, can be used to convert the logged text file to a PGM image for verification. 
+A Vivado sample workspace can be downloaded from [here](https://github.com/eisl-nctu/pyramid/tree/master/archive/pyramid.zip). This workspace contains the test software (for Xilinx SDK) that uses a Microbalze processor to control the image down-scaling accelerator. The sample software reads an 640x480 input image through the UART port and prints the output image to the UART port. You can enable the logging function of your terminal emulator (Teraterm Pro in our case) to save the output image(s) to a file. An offline command-line tool, log2pgm, can be used to convert the logged text file to a PGM image for verification. 
 
 We are working on a RISC-V SoC that has SD card access capabilities. We plan to migrate the image pyramid accelerator over to the RISC-V SoC when its ready.
 
