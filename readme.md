@@ -18,3 +18,5 @@ Embedded Intelligent Systems Lab (EISL)
 Department of Computer Science  
 National Chiao Tung University  
 Hsinchu, Taiwan  
+
+eisl.nctu-at-gmail  
