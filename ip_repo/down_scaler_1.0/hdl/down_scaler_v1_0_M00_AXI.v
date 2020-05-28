@@ -66,7 +66,7 @@ module down_scaler_v1_0_M00_AXI #
 (
     // Base address of targeted slave
     parameter C_M_TARGET_SLAVE_BASE_ADDR	= 32'h00000000,
-    // Burst Length. Supports only 32 burst lengths
+    // Burst Length. Supports only the burst length of 32.
     parameter integer C_M_AXI_BURST_LEN	= 32,
     // Thread ID Width
     parameter integer C_M_AXI_ID_WIDTH	= 1,
