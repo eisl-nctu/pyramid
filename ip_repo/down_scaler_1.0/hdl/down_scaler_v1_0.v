@@ -70,7 +70,7 @@ module down_scaler_v1_0
     
     // Parameters of Axi Master Bus Interface M00_AXI
     parameter  C_M00_AXI_TARGET_SLAVE_BASE_ADDR    = 32'h00000000,
-    parameter integer C_M00_AXI_BURST_LEN    = 16,
+    parameter integer C_M00_AXI_BURST_LEN    = 32,
     parameter integer C_M00_AXI_ID_WIDTH    = 1,
     parameter integer C_M00_AXI_ADDR_WIDTH    = 32,
     parameter integer C_M00_AXI_DATA_WIDTH    = 32,
