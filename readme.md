@@ -17,3 +17,4 @@ We are working on a RISC-V SoC that has SD card access capabilities. We plan to 
 Embedded Intelligent Systems Lab (EISL)  
 Department of Computer Science  
 National Chiao Tung University  
+Hsinchu, Taiwan  
