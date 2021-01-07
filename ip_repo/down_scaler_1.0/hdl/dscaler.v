@@ -151,6 +151,7 @@ localparam WRT_RAM_ADDR_LIMIT_FOR_INPUT_AND_OUTPUT = PING_PONG_RAM_SIZE - NUMBER
 localparam MAX_RD_MEM_TIMES = ( TOTAL_PIXEL / NUMBER_OF_PIXELS ) / BURST_LEN; //  640*480/4/32 = 2400
 localparam PING_PONG_RAM_DEPTH = PING_PONG_RAM_SIZE / PIXEL_BUFFER_SIZE; //  128/32 = 4
 localparam INTER_RAM_DEPTH = TOTAL_PIXEL / PIXEL_BUFFER_SIZE; //   640*480/32 = 9600
+localparam INTER_RAM_ROW_WIDTH = ORIGIN_HEIGHT / 32;
 
 localparam integer PIXEL_BUFFER_SIZE_BITS_LENGTH = clogb2( PIXEL_BUFFER_SIZE );
 localparam integer INTER_RAM_DEPTH_BITS_LENGTH = clogb2( INTER_RAM_DEPTH );
@@ -166,9 +167,9 @@ localparam integer H_RD_RAM_CNT_BITS_LENGTH = clogb2( ( PING_PONG_RAM_SIZE / PIX
 // ------------------ dscaler control signal ------------------------------------
 //down scaling state
 localparam IDLE = 0, RD_MEM = 1, RDY_FOR_H = 2, H_SCALE = 3, NXT_ROW = 4, WRT_RAM = 5, CLN_BUF = 6,
-          RDY_FOR_V = 7, V_SCALE = 8, NXT_COL = 9, WRT_MEM_0 = 10,
-          PRELOAD_0 = 11, PRELOAD_1 = 12, PRELOAD_2 = 13,
-          H_STALL = 14, V_STALL = 15, WRT_MEM_1 = 16, CMPLT = 17, INIT = 18;
+          RDY_FOR_V = 7, V_SCALE = 8, WRT_MEM_0 = 9,
+          PRELOAD_0 = 10, PRELOAD_1 = 11, PRELOAD_2 = 12,
+          H_STALL = 13, V_STALL = 14, WRT_MEM_1 = 15, CMPLT = 16, INIT = 17;
 
 //---------------------------------------------------------------------
 //   WIRE AND REG DECLARATION
@@ -362,9 +363,7 @@ reg signed[ 16: 0 ] multiply[ 0: 11 ];
 reg signed[ 19: 0 ] accumulate[ 0: 1 ];
 reg signed[ 14: 0 ] scaled_pixel;
 
-//special case: NXT_COL and STALL are adjacent cycle need to special processing
-reg [ 7: 0 ] scaled_pixel_at_ram_full;
-reg nxt_col_at_ram_full;
+//modified : remove NXT_COL special case execution
 
 //=================================================================================
 //	IMPLEMENTATION OF dscaler
@@ -477,10 +476,6 @@ begin
             begin
                 state_n = V_STALL;
             end
-            else if ( scaling_pxl_idx_reg == OUT_HEIGHT )
-            begin
-                state_n = NXT_COL;
-            end
             else
             begin
                 state_n = V_SCALE;
@@ -494,8 +489,6 @@ begin
             begin
                 state_n = V_STALL;
             end
-        NXT_COL:
-            state_n = V_SCALE;
         WRT_MEM_0:
             if ( write_last_pxl == 4 )
             begin
@@ -675,8 +668,8 @@ end
 //scaler state
 assign preloading = ( state_c == PRELOAD_0 || state_c == PRELOAD_1 || state_c == PRELOAD_2 );
 assign h_scaling = ( state_c == RDY_FOR_H || state_c == H_SCALE || state_c == NXT_ROW );
-assign v_scaling = ( state_c == RDY_FOR_V || state_c == V_SCALE || state_c == NXT_COL );
-assign reload_pixel_state = ( state_c == NXT_COL || state_c == NXT_ROW || state_c == RDY_FOR_V || state_c == RDY_FOR_H ); //reload pixel state
+assign v_scaling = ( state_c == RDY_FOR_V || state_c == V_SCALE );
+assign reload_pixel_state = ( state_c == NXT_ROW || state_c == RDY_FOR_V || state_c == RDY_FOR_H ); //reload pixel state
 
 
 always@( posedge clk )
@@ -702,53 +695,7 @@ begin
     end
 end
 
-
-//**************************************
-// special case execution begin
-//**************************************
-always@( posedge clk )
-begin
-    if ( ~reset_n || state_n == CMPLT )
-    begin
-        nxt_col_at_ram_full <= 0;
-    end
-    else if ( state_c == V_SCALE && state_n != V_STALL )
-    begin
-        nxt_col_at_ram_full <= 0;
-    end
-    else if ( state_c == NXT_COL && ram_full_0 && ram_full_1 )
-    begin
-        nxt_col_at_ram_full <= 1;
-    end
-    else
-    begin
-        nxt_col_at_ram_full <= nxt_col_at_ram_full;
-    end
-end
-
-always@( posedge clk )
-begin
-    if ( ~reset_n || state_n == CMPLT )
-    begin
-        scaled_pixel_at_ram_full <= 0;
-    end
-    else if ( state_c == V_SCALE && state_n != V_STALL )
-    begin
-        scaled_pixel_at_ram_full <= 0;
-    end
-    else if ( state_c == NXT_COL && ram_full_0 && ram_full_1 )
-    begin
-        scaled_pixel_at_ram_full <= ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-    end
-    else
-    begin
-        scaled_pixel_at_ram_full <= scaled_pixel_at_ram_full;
-    end
-end
-
-//**************************************
-// special case execution end
-//**************************************
+// modified : remove NXT_COL special case execution
 
 //read memory request count
 always@( posedge clk )
@@ -792,20 +739,56 @@ begin
     end
 end
 
+// modified | 0 1 2 3 4 5 | 6 | 7 8 9 10 11 |
+// 當需要使用 head, tail時， 須改變rd_inter_ram_addr
+// 25 26 27 28 29 30 31
+wire use_head, use_tail;
+reg [ 3: 0 ] filter_number_pre;
+reg [ 4: 0 ] pixel_number_pre;
+//modified 記錄目前做到第幾個row，到底則歸0
+wire h_preloading = preloading && ~v_flag;
+wire v_preloading = preloading && v_flag;
+
+always@( * )
+begin
+    if ( v_preloading || v_scaling )
+    begin
+        { pixel_number_pre, filter_number_pre } <= reference_table[ down_level - 1 - scaled_pixel_index_reg ];
+    end
+    else
+    begin
+        { pixel_number_pre, filter_number_pre } <= 0;
+    end
+end
+
+assign use_head = pixel_number_pre < 6;
+assign use_tail = pixel_number_pre > 26;
 // row pixel index from 0 to OUT_WIDTH to calculate reference_table
 always@( * )
 begin
-    if ( ~reset_n )
+    if ( ~reset_n || state_n == CLN_BUF )
     begin
         scaling_pxl_idx <= 0;
     end
-    else if ( scaling_pxl_idx_reg == OUT_WIDTH && state_c == H_SCALE || scaling_pxl_idx_reg == OUT_HEIGHT && state_c == V_SCALE )
+    else if ( scaling_pxl_idx_reg == OUT_WIDTH && state_c == H_SCALE )
     begin
         scaling_pxl_idx <= 0;
     end
-    else if ( preloading || h_scaling || v_scaling )
+    else if ( h_preloading || h_scaling )
     begin
         scaling_pxl_idx <= scaling_pxl_idx_reg + 1;
+    end
+    else if ( v_scaling && scaling_pxl_idx_reg == OUT_WIDTH )
+    begin
+        scaling_pxl_idx <= 0;
+    end
+    else if ( state_n == RDY_FOR_V || v_preloading || v_scaling )
+    begin
+        scaling_pxl_idx <= scaling_pxl_idx_reg + 1;
+    end
+    else if ( v_flag )
+    begin
+        scaling_pxl_idx <= scaling_pxl_idx_reg;
     end
     else
     begin
@@ -819,7 +802,7 @@ begin
     begin
         scaling_pxl_idx_reg <= 0;
     end
-    else if ( state_c == H_STALL || state_n == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_c == H_STALL || state_n == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
         scaling_pxl_idx_reg <= scaling_pxl_idx_reg;
     end
@@ -835,13 +818,26 @@ begin
     begin
         scaled_pixel_index <= 0;
     end
-    else if ( scaled_pixel_index_reg == OUT_WIDTH && state_c == H_SCALE || scaled_pixel_index_reg == OUT_HEIGHT && state_c == V_SCALE )
+    // modified scaled_pixel_index每做完一row才+1
+    else if ( scaled_pixel_index_reg == OUT_WIDTH && state_c == H_SCALE )
     begin
         scaled_pixel_index <= 0;
     end
-    else if ( h_scaling || v_scaling )
+    else if ( h_scaling )
     begin
         scaled_pixel_index <= scaled_pixel_index_reg + 1;
+    end
+    else if ( v_scaling && scaling_pxl_idx_reg == OUT_WIDTH && scaled_pixel_index_reg == down_level - 1)
+    begin
+        scaled_pixel_index <= 0;
+    end
+    else if ( v_scaling && scaling_pxl_idx_reg == OUT_WIDTH )
+    begin
+        scaled_pixel_index <= scaled_pixel_index_reg + 1;
+    end
+    else if ( v_flag )
+    begin
+        scaled_pixel_index <= scaled_pixel_index_reg;
     end
     else
     begin
@@ -871,7 +867,7 @@ begin
     begin
         scaling_round_counter <= 0;
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
         scaling_round_counter <= scaling_round_counter;
     end
@@ -883,7 +879,11 @@ begin
     begin
         scaling_round_counter <= 0;
     end
-    else if ( ( scaling_pxl_idx_reg == OUT_WIDTH && state_c == H_SCALE ) || ( scaling_pxl_idx_reg == OUT_HEIGHT && state_c == V_SCALE ) )
+    else if ( scaling_pxl_idx_reg == OUT_WIDTH && state_c == H_SCALE )
+    begin
+        scaling_round_counter <= scaling_round_counter + 1;
+    end
+    else if ( v_scaling && scaled_pixel_index_reg == ( down_level -1 ) && scaling_pxl_idx_reg == OUT_WIDTH )
     begin
         scaling_round_counter <= scaling_round_counter + 1;
     end
@@ -899,11 +899,15 @@ begin
     begin
         left_edge_detection <= 0;
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
         left_edge_detection <= left_edge_detection;
     end
-    else if ( ( pixel_number < 6 ) && scaling_pxl_idx_reg <= 6 )
+    else if ( ~v_flag && ( pixel_number < 6 ) && scaling_pxl_idx_reg <= 6 )
+    begin
+        left_edge_detection <= 0;
+    end
+    else if ( v_flag && ( pixel_number < 6 ) && (scaling_round_counter == INTER_RAM_ROW_WIDTH - 1 || scaling_round_counter == INTER_RAM_ROW_WIDTH) )
     begin
         left_edge_detection <= 0;
     end
@@ -919,11 +923,19 @@ begin
     begin
         right_edge_detection <= 0;
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
         right_edge_detection <= right_edge_detection;
     end
-    else if ( pixel_number > 26 && ( scaling_pxl_idx > limit_length - 5 ) || ( state_n == NXT_ROW ) || ( state_n == NXT_COL ) || ( state_n == WRT_RAM ) || ( state_n == WRT_MEM_0 ) )
+    else if ( ( state_n == NXT_ROW ) || ( state_n == WRT_RAM ) || ( state_n == WRT_MEM_0 ) )
+    begin
+        right_edge_detection <= 0;
+    end
+    else if ( ~v_flag && pixel_number > 26 && ( scaling_pxl_idx > limit_length - 5 ) )
+    begin
+        right_edge_detection <= 0;
+    end
+    else if ( v_flag && pixel_number > 26 && scaling_round_counter == 0 )
     begin
         right_edge_detection <= 0;
     end
@@ -940,7 +952,7 @@ begin
     begin
         write_last_pxl <= 0;
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
         write_last_pxl <= write_last_pxl;
     end
@@ -957,7 +969,7 @@ begin
 end
 
 assign h_end = ( scaling_round_counter == IN_HEIGHT && scaling_pxl_idx_reg == OUT_WIDTH );
-assign v_end = ( scaling_round_counter == OUT_WIDTH && scaling_pxl_idx_reg == OUT_HEIGHT );
+assign v_end = ( scaling_round_counter == INTER_RAM_ROW_WIDTH && state_c == V_SCALE );
 
 always@( posedge clk )
 begin
@@ -1169,38 +1181,38 @@ generate
 endgenerate
 
 //RAM_0 & RAM_1 input ports
-assign data_in[ 0 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 1 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 2 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 3 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 4 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 5 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 6 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 7 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 8 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 9 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 10 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 11 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 12 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 13 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 14 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 15 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 16 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 17 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 18 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 19 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 20 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 21 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 22 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 23 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 24 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 25 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 26 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 27 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 28 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 29 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 30 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
-assign data_in[ 31 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( nxt_col_at_ram_full ) ? scaled_pixel_at_ram_full : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 0 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 1 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 2 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 3 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 4 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 5 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 6 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 7 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 8 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 9 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 10 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 11 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 12 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 13 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 14 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 15 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 16 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 17 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 18 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 19 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 20 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 21 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 22 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 23 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 24 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 25 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 26 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 27 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 28 ] = ( pixel_in_valid ) ? pixel_in_reg[ 0 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 29 ] = ( pixel_in_valid ) ? pixel_in_reg[ 1 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 30 ] = ( pixel_in_valid ) ? pixel_in_reg[ 2 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
+assign data_in[ 31 ] = ( pixel_in_valid ) ? pixel_in_reg[ 3 ] : ( scaled_pixel >= 255 ) ? 255 : ( scaled_pixel <= 0 ) ? 0 : scaled_pixel;
 
 //that ram_full_0 signal is high means RAM_0 is full.
 always@( posedge clk )
@@ -1475,20 +1487,53 @@ end
 //=========================================
 
 //0~31, total 32 row inter_ram
+
 genvar INTER_RAM_PORT;
 generate
+    // 0 ~ 4 tail next group
+    // 26 ~ 31 head prev group
+    // modified
     for ( INTER_RAM_PORT = 0;INTER_RAM_PORT < PIXEL_BUFFER_SIZE;INTER_RAM_PORT = INTER_RAM_PORT + 1 )
     begin
-        sram
-            #( .DATA_WIDTH( 8 ), .ADDR_WIDTH( INTER_RAM_DEPTH_BITS_LENGTH ), .RAM_SIZE( INTER_RAM_DEPTH ) )
-            ram(
-                .clk( clk ),
-                .en( inter_ram_en ),
-                .we( inter_ram_we[ INTER_RAM_PORT ] ),
-                .addr( inter_ram_addr ),
-                .data_i( inter_data_in ),
-                .data_o( inter_data_out[ INTER_RAM_PORT ] )
-            );
+        if (INTER_RAM_PORT < 5)
+        begin
+            sram
+                #( .DATA_WIDTH( 8 ), .ADDR_WIDTH( INTER_RAM_DEPTH_BITS_LENGTH ), .RAM_SIZE( INTER_RAM_DEPTH ) )
+                ram(
+                    .clk( clk ),
+                    .en( inter_ram_en ),
+                    .we( inter_ram_we[ INTER_RAM_PORT ] ),
+                    .addr( (use_tail && v_flag) ? inter_ram_addr + 1 : inter_ram_addr ),
+                    .data_i( inter_data_in ),
+                    .data_o( inter_data_out[ INTER_RAM_PORT ] )
+                );
+        end
+        else if (INTER_RAM_PORT >  25)
+        begin
+            sram
+                #( .DATA_WIDTH( 8 ), .ADDR_WIDTH( INTER_RAM_DEPTH_BITS_LENGTH ), .RAM_SIZE( INTER_RAM_DEPTH ) )
+                ram(
+                    .clk( clk ),
+                    .en( inter_ram_en ),
+                    .we( inter_ram_we[ INTER_RAM_PORT ] ),
+                    .addr( (use_head && v_flag) ? inter_ram_addr - 1 : inter_ram_addr ),
+                    .data_i( inter_data_in ),
+                    .data_o( inter_data_out[ INTER_RAM_PORT ] )
+                );
+        end
+        else
+        begin
+            sram
+                #( .DATA_WIDTH( 8 ), .ADDR_WIDTH( INTER_RAM_DEPTH_BITS_LENGTH ), .RAM_SIZE( INTER_RAM_DEPTH ) )
+                ram(
+                    .clk( clk ),
+                    .en( inter_ram_en ),
+                    .we( inter_ram_we[ INTER_RAM_PORT ] ),
+                    .addr( inter_ram_addr ),
+                    .data_i( inter_data_in ),
+                    .data_o( inter_data_out[ INTER_RAM_PORT ] )
+                );
+        end
     end
 endgenerate
 
@@ -1546,29 +1591,39 @@ begin
     end
 end
 
+//modified : 更改v_scaling時讀inter ram之順序
 always@( posedge clk )
 begin
-    if ( ~reset_n )
+    if ( ~reset_n || state_n == CMPLT )
     begin
         rd_inter_ram_addr <= 0;
     end
-    else if ( state_n == CLN_BUF || state_n == CMPLT )
+    else if ( state_n == CLN_BUF )
     begin
-        rd_inter_ram_addr <= 0;
+        // 由第一個row最後一個col開始
+        rd_inter_ram_addr[ INTER_RAM_DEPTH_BITS_LENGTH - 1 + PIXEL_BUFFER_SIZE_BITS_LENGTH - 1: 5 ] <= ( INTER_RAM_ROW_WIDTH - 1 );
     end
-    else if ( state_c == RDY_FOR_V || state_c == NXT_COL )
+    else if ( v_scaling && scaling_pxl_idx_reg == OUT_WIDTH && scaled_pixel_index_reg == ( down_level -1 ) )
     begin
-        rd_inter_ram_addr <= rd_inter_ram_addr;
+        // 若此pixel group以做完down_level次，則換下一個col
+        rd_inter_ram_addr[ INTER_RAM_DEPTH_BITS_LENGTH - 1 + PIXEL_BUFFER_SIZE_BITS_LENGTH - 1: 5 ] <= ( INTER_RAM_ROW_WIDTH - scaling_round_counter - 2 );
     end
-    else if ( state_n == RDY_FOR_V || state_n == NXT_COL || ( reference_table_index == 0 && reload_pixel_buffer == 1 ) )
+    else if ( v_scaling && scaling_pxl_idx_reg == OUT_WIDTH )
     begin
-        rd_inter_ram_addr[ INTER_RAM_DEPTH_BITS_LENGTH - 1 + PIXEL_BUFFER_SIZE_BITS_LENGTH - 1: 5 ] <= rd_inter_ram_addr[ INTER_RAM_DEPTH_BITS_LENGTH - 1 + PIXEL_BUFFER_SIZE_BITS_LENGTH - 1: 5 ] + 1;
-    end //reference_table_index==0 then reload_pixel_buffer must 1
+        // 做到row底，回第一個row
+        rd_inter_ram_addr[ INTER_RAM_DEPTH_BITS_LENGTH - 1 + PIXEL_BUFFER_SIZE_BITS_LENGTH - 1: 5 ] <= ( INTER_RAM_ROW_WIDTH - scaling_round_counter - 1 );
+    end
+    else if ( state_n == RDY_FOR_V || v_preloading || v_scaling )
+    begin
+        // 每次跳一row，即INTER_RAM_ROW_WIDTH
+        rd_inter_ram_addr[ INTER_RAM_DEPTH_BITS_LENGTH - 1 + PIXEL_BUFFER_SIZE_BITS_LENGTH - 1: 5 ] <= rd_inter_ram_addr[ INTER_RAM_DEPTH_BITS_LENGTH - 1 + PIXEL_BUFFER_SIZE_BITS_LENGTH - 1: 5 ] + INTER_RAM_ROW_WIDTH;
+    end
     else
     begin
         rd_inter_ram_addr <= rd_inter_ram_addr;
     end
 end
+
 
 assign write_next_INTER_RAM_PORT = ( state_c != IDLE && state_c != INIT ) && ( scaled_pixel_index_reg == OUT_WIDTH );
 
@@ -1779,30 +1834,42 @@ begin
     end
 
 end
+
 always@( posedge clk )
 begin
     if ( ~reset_n )
     begin
         reference_table_index <= 0;
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
         reference_table_index <= reference_table_index;
     end
-    else if ( reference_table_index == ( down_level - 1 ) || state_n == CMPLT )
+    else if ( (~v_flag && reference_table_index == ( down_level - 1 )) || state_n == CMPLT )
     begin
         reference_table_index <= 0;
     end
-    else if ( preloading || h_scaling || v_scaling )
+    else if ( h_preloading || h_scaling )
     begin
         reference_table_index <= reference_table_index + 1;
+    end
+    else if ( state_n == RDY_FOR_V )
+    begin
+        reference_table_index <= ( down_level - 1 );
+    end
+    else if ( v_scaling && scaling_pxl_idx_reg == 0 && reference_table_index == 0 )
+    begin
+        // modified 當做完一個row才 + 1
+        reference_table_index <= ( down_level - 1 );
+    end
+    else if ( v_scaling && scaling_pxl_idx_reg == 0 )
+    begin
+        reference_table_index <= reference_table_index - 1;
     end
     else
     begin
         reference_table_index <= reference_table_index;
     end
-
-
 end
 
 
@@ -1904,7 +1971,7 @@ end
 
 always@( * )
 begin
-    if ( preloading || h_scaling || v_scaling )
+    if ( h_preloading || h_scaling || v_preloading || v_scaling )
     begin
         { pixel_number, filter_number } <= reference_table[ reference_table_index ];
     end
@@ -1920,7 +1987,7 @@ begin
     begin
         { pixel_number_reg, filter_number_reg } <= 0;
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
         { pixel_number_reg, filter_number_reg } <= { pixel_number_reg, filter_number_reg };
     end
@@ -1947,7 +2014,7 @@ begin
             pixel_buffer[ i ] <= 0;
         end
     end
-    else if ( state_c == H_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_c == H_STALL || state_c == V_STALL )
     begin
         for ( i = 0;i < PIXEL_BUFFER_SIZE;i = i + 1 )
         begin
@@ -1961,7 +2028,7 @@ begin
             pixel_buffer[ i ] <= ( h_rd_ram_ptr == 0 ) ? data_out_0[ i ] : data_out_1[ i ];
         end
     end
-    else if ( reference_table_index == 0 && reload_pixel_buffer == 1 )
+    else if ( v_flag )
     begin
         for ( i = 0;i < PIXEL_BUFFER_SIZE;i = i + 1 )
         begin
@@ -1983,7 +2050,7 @@ begin
     begin
         reload_pixel_buffer_tail_delay <= 0;
     end
-    else if ( state_c == H_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_c == H_STALL || state_c == V_STALL )
     begin
         reload_pixel_buffer_tail_delay <= reload_pixel_buffer_tail_delay;
     end
@@ -2003,21 +2070,22 @@ begin
             pixel_buffer_tail[ i ] <= 0;
         end
     end
-    else if ( state_c == H_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_c == H_STALL || state_c == V_STALL )
     begin
         for ( i = 0;i < 5;i = i + 1 )
         begin
             pixel_buffer_tail[ i ] <= pixel_buffer_tail[ i ];
         end
     end
-    else if ( ( preloading && v_flag || state_c == V_SCALE ) && reload_pixel_buffer_tail_delay == 1 )
+    // modified
+    else if ( v_preloading || v_scaling )
     begin
         for ( i = 0;i < 5;i = i + 1 )
         begin
             pixel_buffer_tail[ i ] <= inter_data_out[ i ];
         end
     end
-    else if ( ( preloading || state_c == H_SCALE ) && reload_pixel_buffer_tail_delay == 1 )
+    else if ( ( h_preloading || state_c == H_SCALE ) && reload_pixel_buffer_tail_delay == 1 )
     begin
         for ( i = 0;i < 5;i = i + 1 )
         begin
@@ -2043,18 +2111,26 @@ begin
             pixel_buffer_head[ i ] <= 0;
         end
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
         for ( i = 0;i < 6;i = i + 1 )
         begin
             pixel_buffer_head[ i ] <= pixel_buffer_head[ i ];
         end
     end
-    else if ( reference_table_index == 0 && reload_pixel_buffer == 1 )
+    // modified
+    else if ( ~v_flag && reference_table_index == 0 && reload_pixel_buffer == 1 )
     begin //reference_table_index=0 && reload_pixel_buffer is same
         for ( i = 0;i < 6;i = i + 1 )
         begin
             pixel_buffer_head[ i ] <= pixel_buffer[ 26 + i ];
+        end
+    end
+    else if ( v_preloading || v_scaling )
+    begin
+        for ( i = 0;i < 6;i = i + 1 )
+        begin
+            pixel_buffer_head[ i ] <= inter_data_out[ 26 + i ];
         end
     end
     else
@@ -2068,7 +2144,11 @@ end
 
 always@( * )
 begin
-    if ( state_c != V_STALL && state_n != V_STALL && state_c != IDLE && state_c != INIT && state_c != RD_MEM && reference_table_index == 0 )
+    if ( ~v_flag && state_c != V_STALL && state_n != V_STALL && state_c != IDLE && state_c != INIT && state_c != RD_MEM && reference_table_index == 0 )
+    begin
+        reload_pixel_buffer <= 1;
+    end
+    else if ( v_flag )
     begin
         reload_pixel_buffer <= 1;
     end
@@ -2084,11 +2164,11 @@ begin
     begin
         load_buf_cnt <= 0;
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
         load_buf_cnt <= load_buf_cnt;
     end
-    else if ( state_n == NXT_ROW || state_n == NXT_COL || state_n == CLN_BUF || state_n == IDLE || state_n == CMPLT )
+    else if ( state_n == NXT_ROW || state_n == CLN_BUF || state_n == IDLE || state_n == CMPLT )
     begin
         load_buf_cnt <= 0;
     end
@@ -2112,7 +2192,7 @@ begin
     begin
         reload_pixel_buffer_tail <= 0;
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
         reload_pixel_buffer_tail <= reload_pixel_buffer_tail;
     end
@@ -2191,7 +2271,7 @@ begin
     begin
         h_scaled_pixel_valid <= 0;
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
         h_scaled_pixel_valid <= 0;
     end
@@ -2239,7 +2319,7 @@ begin
     begin
         scaled_pixel <= 0;
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
         scaled_pixel <= scaled_pixel;
     end
@@ -2260,7 +2340,7 @@ begin
         accumulate[ 0 ] <= 0;
         accumulate[ 1 ] <= 0;
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
         accumulate[ 0 ] <= accumulate[ 0 ];
         accumulate[ 1 ] <= accumulate[ 1 ];
@@ -2298,7 +2378,7 @@ begin
 
         end
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
 
 
@@ -2370,7 +2450,7 @@ begin
         pixel[ 5 ] <= 0;
 
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
         pixel[ 0 ] <= pixel[ 0 ];
         pixel[ 1 ] <= pixel[ 1 ];
@@ -2474,7 +2554,7 @@ begin
         pixel[ 11 ] <= 0;
 
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
 
         pixel[ 6 ] <= pixel[ 6 ];
@@ -2573,7 +2653,7 @@ begin
 
 
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL || nxt_col_at_ram_full )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
     begin
 
         filter[ 0 ] <= filter[ 0 ];
