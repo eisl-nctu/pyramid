@@ -151,7 +151,6 @@ localparam WRT_RAM_ADDR_LIMIT_FOR_INPUT_AND_OUTPUT = PING_PONG_RAM_SIZE - NUMBER
 localparam MAX_RD_MEM_TIMES = ( TOTAL_PIXEL / NUMBER_OF_PIXELS ) / BURST_LEN; //  640*480/4/32 = 2400
 localparam PING_PONG_RAM_DEPTH = PING_PONG_RAM_SIZE / PIXEL_BUFFER_SIZE; //  128/32 = 4
 localparam INTER_RAM_DEPTH = TOTAL_PIXEL / PIXEL_BUFFER_SIZE; //   640*480/32 = 9600
-localparam INTER_RAM_ROW_WIDTH = ORIGIN_HEIGHT / 32;
 
 localparam integer PIXEL_BUFFER_SIZE_BITS_LENGTH = clogb2( PIXEL_BUFFER_SIZE );
 localparam integer INTER_RAM_DEPTH_BITS_LENGTH = clogb2( INTER_RAM_DEPTH );
@@ -167,9 +166,9 @@ localparam integer H_RD_RAM_CNT_BITS_LENGTH = clogb2( ( PING_PONG_RAM_SIZE / PIX
 // ------------------ dscaler control signal ------------------------------------
 //down scaling state
 localparam IDLE = 0, RD_MEM = 1, RDY_FOR_H = 2, H_SCALE = 3, NXT_ROW = 4, WRT_RAM = 5, CLN_BUF = 6,
-          RDY_FOR_V = 7, V_SCALE = 8, WRT_MEM_0 = 9,
-          PRELOAD_0 = 10, PRELOAD_1 = 11, PRELOAD_2 = 12,
-          H_STALL = 13, V_STALL = 14, WRT_MEM_1 = 15, CMPLT = 16, INIT = 17;
+          RDY_FOR_V = 7, V_SCALE = 8, NXT_COL = 9, WRT_MEM_0 = 10,
+          PRELOAD_0 = 11, PRELOAD_1 = 12, PRELOAD_2 = 13,
+          H_STALL = 14, V_STALL = 15, WRT_MEM_1 = 16, CMPLT = 17, INIT = 18;
 
 //---------------------------------------------------------------------
 //   WIRE AND REG DECLARATION
@@ -363,11 +362,133 @@ reg signed[ 16: 0 ] multiply[ 0: 11 ];
 reg signed[ 19: 0 ] accumulate[ 0: 1 ];
 reg signed[ 14: 0 ] scaled_pixel;
 
-//modified : remove NXT_COL special case execution
-
 //=================================================================================
 //	IMPLEMENTATION OF dscaler
 //=================================================================================
+
+localparam INTER_RAM_ROW_WIDTH = ORIGIN_HEIGHT / PIXEL_BUFFER_SIZE;
+reg [ WIDTH_BITS_LENGTH - 1: 0 ] v_scaling_row_counter;
+reg [ WIDTH_BITS_LENGTH - 1: 0 ] v_scaling_col_counter;
+reg [ WIDTH_BITS_LENGTH - 1: 0 ] down_level_counter;
+wire h_preloading = preloading && ~v_flag;
+wire v_preloading = preloading && v_flag;
+
+always@( posedge clk )
+begin
+    if ( ~reset_n )
+    begin
+        v_scaling_row_counter <= 0;
+    end
+    else if ( state_n == V_STALL || state_c == V_STALL )
+    begin
+        v_scaling_row_counter <= v_scaling_row_counter;
+    end
+    else if ( v_scaling && v_scaling_row_counter == OUT_WIDTH )
+    begin
+        v_scaling_row_counter <= 0;
+    end
+    else if ( state_n == RDY_FOR_V || v_preloading || v_scaling )
+    begin
+        v_scaling_row_counter <= v_scaling_row_counter + 1;
+    end
+    else
+    begin
+        v_scaling_row_counter <= v_scaling_row_counter;
+    end
+end
+
+always@( posedge clk )
+begin
+    if ( ~reset_n )
+    begin
+        v_scaling_col_counter <= 0;
+    end
+    else if ( state_n == V_STALL || state_c == V_STALL )
+    begin
+        v_scaling_col_counter <= v_scaling_col_counter;
+    end
+    else if ( v_scaling && v_scaling_row_counter == OUT_WIDTH && down_level_counter == 0 )
+    begin
+        v_scaling_col_counter <= v_scaling_col_counter + 1;
+    end
+    else
+    begin
+        v_scaling_col_counter <= v_scaling_col_counter;
+    end
+end
+
+always@( posedge clk )
+begin
+    if ( ~reset_n )
+    begin
+        down_level_counter <= 0;
+    end
+    else if ( state_n == CLN_BUF )
+    begin
+        down_level_counter <= down_level - 1;
+    end
+    else if ( state_n == V_STALL || state_c == V_STALL )
+    begin
+        down_level_counter <= down_level_counter;
+    end
+    else if ( v_scaling && v_scaling_row_counter == 0 && down_level_counter == 0 )
+    begin
+        down_level_counter <= down_level - 1;
+    end
+    else if ( v_scaling && v_scaling_row_counter == 0 )
+    begin
+        down_level_counter <= down_level_counter - 1;
+    end
+    else
+    begin
+        down_level_counter <= down_level_counter;
+    end
+end
+
+reg [ WIDTH_BITS_LENGTH - 1: 0 ] pre_down_level_counter;
+always@ ( * )
+begin
+    if  ( v_scaling_row_counter == OUT_WIDTH && down_level_counter == 0 ) 
+    begin
+        pre_down_level_counter <= down_level - 1;
+    end
+    else if ( v_scaling_row_counter == 0 && down_level_counter == 0 )
+    begin
+        pre_down_level_counter <= down_level - 1;
+    end
+    else if ( v_scaling_row_counter == OUT_WIDTH )
+    begin
+        pre_down_level_counter <= down_level_counter - 1;
+    end
+    else if ( v_scaling_row_counter == 0 )
+    begin
+        pre_down_level_counter <= down_level_counter - 1;
+    end
+    else
+    begin
+        pre_down_level_counter <= down_level_counter;
+    end
+end
+
+reg [ 4: 0 ] pre_pixel_number;
+reg [ 3: 0 ] pre_filter_number;
+always@( posedge clk )
+begin
+
+    if ( ~reset_n )
+    begin
+        { pre_pixel_number, pre_filter_number } <= 0;
+    end
+    else
+    begin
+        { pre_pixel_number, pre_filter_number } <= reference_table[ pre_down_level_counter ];
+    end
+end
+
+wire use_head, use_tail;
+
+assign use_head = pre_pixel_number < 6;
+assign use_tail = pre_pixel_number > 26 ;
 
 //======================================
 //   dscaler state control
@@ -695,8 +816,6 @@ begin
     end
 end
 
-// modified : remove NXT_COL special case execution
-
 //read memory request count
 always@( posedge clk )
 begin
@@ -739,56 +858,20 @@ begin
     end
 end
 
-// modified | 0 1 2 3 4 5 | 6 | 7 8 9 10 11 |
-// 當需要使用 head, tail時， 須改變rd_inter_ram_addr
-// 25 26 27 28 29 30 31
-wire use_head, use_tail;
-reg [ 3: 0 ] filter_number_pre;
-reg [ 4: 0 ] pixel_number_pre;
-//modified 記錄目前做到第幾個row，到底則歸0
-wire h_preloading = preloading && ~v_flag;
-wire v_preloading = preloading && v_flag;
-
-always@( * )
-begin
-    if ( v_preloading || v_scaling )
-    begin
-        { pixel_number_pre, filter_number_pre } <= reference_table[ down_level - 1 - scaled_pixel_index_reg ];
-    end
-    else
-    begin
-        { pixel_number_pre, filter_number_pre } <= 0;
-    end
-end
-
-assign use_head = pixel_number_pre < 6;
-assign use_tail = pixel_number_pre > 26;
 // row pixel index from 0 to OUT_WIDTH to calculate reference_table
 always@( * )
 begin
-    if ( ~reset_n || state_n == CLN_BUF )
+    if ( ~reset_n )
     begin
         scaling_pxl_idx <= 0;
     end
-    else if ( scaling_pxl_idx_reg == OUT_WIDTH && state_c == H_SCALE )
+    else if ( scaling_pxl_idx_reg == OUT_WIDTH && state_c == H_SCALE || scaling_pxl_idx_reg == OUT_HEIGHT && state_c == V_SCALE )
     begin
         scaling_pxl_idx <= 0;
     end
-    else if ( h_preloading || h_scaling )
+    else if ( preloading || h_scaling || v_scaling )
     begin
         scaling_pxl_idx <= scaling_pxl_idx_reg + 1;
-    end
-    else if ( v_scaling && scaling_pxl_idx_reg == OUT_WIDTH )
-    begin
-        scaling_pxl_idx <= 0;
-    end
-    else if ( state_n == RDY_FOR_V || v_preloading || v_scaling )
-    begin
-        scaling_pxl_idx <= scaling_pxl_idx_reg + 1;
-    end
-    else if ( v_flag )
-    begin
-        scaling_pxl_idx <= scaling_pxl_idx_reg;
     end
     else
     begin
@@ -818,26 +901,13 @@ begin
     begin
         scaled_pixel_index <= 0;
     end
-    // modified scaled_pixel_index每做完一row才+1
-    else if ( scaled_pixel_index_reg == OUT_WIDTH && state_c == H_SCALE )
+    else if ( scaled_pixel_index_reg == OUT_WIDTH && state_c == H_SCALE || scaled_pixel_index_reg == OUT_HEIGHT && state_c == V_SCALE )
     begin
         scaled_pixel_index <= 0;
     end
-    else if ( h_scaling )
+    else if ( h_scaling || v_scaling )
     begin
         scaled_pixel_index <= scaled_pixel_index_reg + 1;
-    end
-    else if ( v_scaling && scaling_pxl_idx_reg == OUT_WIDTH && scaled_pixel_index_reg == down_level - 1)
-    begin
-        scaled_pixel_index <= 0;
-    end
-    else if ( v_scaling && scaling_pxl_idx_reg == OUT_WIDTH )
-    begin
-        scaled_pixel_index <= scaled_pixel_index_reg + 1;
-    end
-    else if ( v_flag )
-    begin
-        scaled_pixel_index <= scaled_pixel_index_reg;
     end
     else
     begin
@@ -879,11 +949,7 @@ begin
     begin
         scaling_round_counter <= 0;
     end
-    else if ( scaling_pxl_idx_reg == OUT_WIDTH && state_c == H_SCALE )
-    begin
-        scaling_round_counter <= scaling_round_counter + 1;
-    end
-    else if ( v_scaling && scaled_pixel_index_reg == ( down_level -1 ) && scaling_pxl_idx_reg == OUT_WIDTH )
+    else if ( ( scaling_pxl_idx_reg == OUT_WIDTH && state_c == H_SCALE ) || ( scaling_pxl_idx_reg == OUT_HEIGHT && state_c == V_SCALE ) )
     begin
         scaling_round_counter <= scaling_round_counter + 1;
     end
@@ -907,7 +973,7 @@ begin
     begin
         left_edge_detection <= 0;
     end
-    else if ( v_flag && ( pixel_number < 6 ) && (scaling_round_counter == INTER_RAM_ROW_WIDTH - 1 || scaling_round_counter == INTER_RAM_ROW_WIDTH) )
+    else if ( v_flag && ( pixel_number < 6 ) && ( v_scaling_col_counter == INTER_RAM_ROW_WIDTH - 1 || v_scaling_col_counter == INTER_RAM_ROW_WIDTH ) )
     begin
         left_edge_detection <= 0;
     end
@@ -927,15 +993,11 @@ begin
     begin
         right_edge_detection <= right_edge_detection;
     end
-    else if ( ( state_n == NXT_ROW ) || ( state_n == WRT_RAM ) || ( state_n == WRT_MEM_0 ) )
+    else if ( ~v_flag && pixel_number > 26 && ( scaling_pxl_idx > limit_length - 5 ) || ( state_n == NXT_ROW ) || ( state_n == WRT_RAM ) || ( state_n == WRT_MEM_0 ) )
     begin
         right_edge_detection <= 0;
     end
-    else if ( ~v_flag && pixel_number > 26 && ( scaling_pxl_idx > limit_length - 5 ) )
-    begin
-        right_edge_detection <= 0;
-    end
-    else if ( v_flag && pixel_number > 26 && scaling_round_counter == 0 )
+    else if ( v_flag && pixel_number > 26 && v_scaling_col_counter == 0 )
     begin
         right_edge_detection <= 0;
     end
@@ -969,7 +1031,7 @@ begin
 end
 
 assign h_end = ( scaling_round_counter == IN_HEIGHT && scaling_pxl_idx_reg == OUT_WIDTH );
-assign v_end = ( scaling_round_counter == INTER_RAM_ROW_WIDTH && state_c == V_SCALE );
+assign v_end = ( v_scaling_col_counter == INTER_RAM_ROW_WIDTH && state_c == V_SCALE );
 
 always@( posedge clk )
 begin
@@ -1490,8 +1552,8 @@ end
 
 genvar INTER_RAM_PORT;
 generate
-    // 0 ~ 4 tail next group
-    // 26 ~ 31 head prev group
+    // 0 ~ 4 tail (from next group)
+    // 26 ~ 31 head (from prev group)
     // modified
     for ( INTER_RAM_PORT = 0;INTER_RAM_PORT < PIXEL_BUFFER_SIZE;INTER_RAM_PORT = INTER_RAM_PORT + 1 )
     begin
@@ -1536,6 +1598,7 @@ generate
         end
     end
 endgenerate
+
 
 assign wrt_inter_ram_addr = base + offset;
 
@@ -1591,7 +1654,6 @@ begin
     end
 end
 
-//modified : 更改v_scaling時讀inter ram之順序
 always@( posedge clk )
 begin
     if ( ~reset_n || state_n == CMPLT )
@@ -1600,22 +1662,18 @@ begin
     end
     else if ( state_n == CLN_BUF )
     begin
-        // 由第一個row最後一個col開始
         rd_inter_ram_addr[ INTER_RAM_DEPTH_BITS_LENGTH - 1 + PIXEL_BUFFER_SIZE_BITS_LENGTH - 1: 5 ] <= ( INTER_RAM_ROW_WIDTH - 1 );
     end
-    else if ( v_scaling && scaling_pxl_idx_reg == OUT_WIDTH && scaled_pixel_index_reg == ( down_level -1 ) )
+    else if ( v_scaling && v_scaling_row_counter == OUT_WIDTH && down_level_counter == 0 )
     begin
-        // 若此pixel group以做完down_level次，則換下一個col
-        rd_inter_ram_addr[ INTER_RAM_DEPTH_BITS_LENGTH - 1 + PIXEL_BUFFER_SIZE_BITS_LENGTH - 1: 5 ] <= ( INTER_RAM_ROW_WIDTH - scaling_round_counter - 2 );
+        rd_inter_ram_addr[ INTER_RAM_DEPTH_BITS_LENGTH - 1 + PIXEL_BUFFER_SIZE_BITS_LENGTH - 1: 5 ] <= ( INTER_RAM_ROW_WIDTH - 1 - v_scaling_col_counter - 1);
     end
-    else if ( v_scaling && scaling_pxl_idx_reg == OUT_WIDTH )
+    else if ( v_scaling && v_scaling_row_counter == OUT_WIDTH )
     begin
-        // 做到row底，回第一個row
-        rd_inter_ram_addr[ INTER_RAM_DEPTH_BITS_LENGTH - 1 + PIXEL_BUFFER_SIZE_BITS_LENGTH - 1: 5 ] <= ( INTER_RAM_ROW_WIDTH - scaling_round_counter - 1 );
+        rd_inter_ram_addr[ INTER_RAM_DEPTH_BITS_LENGTH - 1 + PIXEL_BUFFER_SIZE_BITS_LENGTH - 1: 5 ] <= ( INTER_RAM_ROW_WIDTH - 1 - v_scaling_col_counter);
     end
     else if ( state_n == RDY_FOR_V || v_preloading || v_scaling )
     begin
-        // 每次跳一row，即INTER_RAM_ROW_WIDTH
         rd_inter_ram_addr[ INTER_RAM_DEPTH_BITS_LENGTH - 1 + PIXEL_BUFFER_SIZE_BITS_LENGTH - 1: 5 ] <= rd_inter_ram_addr[ INTER_RAM_DEPTH_BITS_LENGTH - 1 + PIXEL_BUFFER_SIZE_BITS_LENGTH - 1: 5 ] + INTER_RAM_ROW_WIDTH;
     end
     else
@@ -1623,7 +1681,6 @@ begin
         rd_inter_ram_addr <= rd_inter_ram_addr;
     end
 end
-
 
 assign write_next_INTER_RAM_PORT = ( state_c != IDLE && state_c != INIT ) && ( scaled_pixel_index_reg == OUT_WIDTH );
 
@@ -1834,7 +1891,6 @@ begin
     end
 
 end
-
 always@( posedge clk )
 begin
     if ( ~reset_n )
@@ -1845,31 +1901,20 @@ begin
     begin
         reference_table_index <= reference_table_index;
     end
-    else if ( (~v_flag && reference_table_index == ( down_level - 1 )) || state_n == CMPLT )
+    else if ( reference_table_index == ( down_level - 1 ) || state_n == CMPLT )
     begin
         reference_table_index <= 0;
     end
-    else if ( h_preloading || h_scaling )
+    else if ( preloading || h_scaling || v_scaling )
     begin
         reference_table_index <= reference_table_index + 1;
-    end
-    else if ( state_n == RDY_FOR_V )
-    begin
-        reference_table_index <= ( down_level - 1 );
-    end
-    else if ( v_scaling && scaling_pxl_idx_reg == 0 && reference_table_index == 0 )
-    begin
-        // modified 當做完一個row才 + 1
-        reference_table_index <= ( down_level - 1 );
-    end
-    else if ( v_scaling && scaling_pxl_idx_reg == 0 )
-    begin
-        reference_table_index <= reference_table_index - 1;
     end
     else
     begin
         reference_table_index <= reference_table_index;
     end
+
+
 end
 
 
@@ -1971,9 +2016,13 @@ end
 
 always@( * )
 begin
-    if ( h_preloading || h_scaling || v_preloading || v_scaling )
+    if ( h_preloading || h_scaling )
     begin
         { pixel_number, filter_number } <= reference_table[ reference_table_index ];
+    end
+    else if ( v_preloading || v_scaling )
+    begin
+        { pixel_number, filter_number } <= reference_table[ down_level_counter ];
     end
     else
     begin
@@ -2077,7 +2126,6 @@ begin
             pixel_buffer_tail[ i ] <= pixel_buffer_tail[ i ];
         end
     end
-    // modified
     else if ( v_preloading || v_scaling )
     begin
         for ( i = 0;i < 5;i = i + 1 )
@@ -2085,7 +2133,7 @@ begin
             pixel_buffer_tail[ i ] <= inter_data_out[ i ];
         end
     end
-    else if ( ( h_preloading || state_c == H_SCALE ) && reload_pixel_buffer_tail_delay == 1 )
+    else if ( ( preloading || state_c == H_SCALE ) && reload_pixel_buffer_tail_delay == 1 )
     begin
         for ( i = 0;i < 5;i = i + 1 )
         begin
@@ -2144,11 +2192,7 @@ end
 
 always@( * )
 begin
-    if ( ~v_flag && state_c != V_STALL && state_n != V_STALL && state_c != IDLE && state_c != INIT && state_c != RD_MEM && reference_table_index == 0 )
-    begin
-        reload_pixel_buffer <= 1;
-    end
-    else if ( v_flag )
+    if ( state_c != V_STALL && state_n != V_STALL && state_c != IDLE && state_c != INIT && state_c != RD_MEM && reference_table_index == 0 )
     begin
         reload_pixel_buffer <= 1;
     end
