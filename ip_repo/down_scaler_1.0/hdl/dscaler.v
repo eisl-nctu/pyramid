@@ -375,7 +375,7 @@ wire v_preloading = preloading && v_flag;
 
 always@( posedge clk )
 begin
-    if ( ~reset_n )
+    if ( ~reset_n || state_c == CMPLT )
     begin
         v_scaling_row_counter <= 0;
     end
@@ -399,7 +399,7 @@ end
 
 always@( posedge clk )
 begin
-    if ( ~reset_n )
+    if ( ~reset_n || state_c == CMPLT )
     begin
         v_scaling_col_counter <= 0;
     end
@@ -419,7 +419,7 @@ end
 
 always@( posedge clk )
 begin
-    if ( ~reset_n )
+    if ( ~reset_n || state_c == CMPLT )
     begin
         down_level_counter <= 0;
     end
@@ -475,13 +475,17 @@ reg [ 3: 0 ] pre_filter_number;
 always@( posedge clk )
 begin
 
-    if ( ~reset_n )
+    if ( ~reset_n || state_c == CMPLT )
     begin
         { pre_pixel_number, pre_filter_number } <= 0;
     end
-    else
+    else if ( state_n == RDY_FOR_V || v_preloading || v_scaling )
     begin
         { pre_pixel_number, pre_filter_number } <= reference_table[ pre_down_level_counter ];
+    end
+    else
+    begin
+        { pre_pixel_number, pre_filter_number } <= { pre_pixel_number, pre_filter_number };
     end
 end
 
@@ -1660,6 +1664,10 @@ begin
     begin
         rd_inter_ram_addr <= 0;
     end
+    else if ( state_n == V_STALL || state_c == V_STALL )
+    begin
+        rd_inter_ram_addr <= rd_inter_ram_addr;
+    end
     else if ( state_n == CLN_BUF )
     begin
         rd_inter_ram_addr[ INTER_RAM_DEPTH_BITS_LENGTH - 1 + PIXEL_BUFFER_SIZE_BITS_LENGTH - 1: 5 ] <= ( INTER_RAM_ROW_WIDTH - 1 );
@@ -2070,18 +2078,18 @@ begin
             pixel_buffer[ i ] <= pixel_buffer[ i ];
         end
     end
+    else if ( v_preloading || v_scaling )
+    begin
+        for ( i = 0;i < PIXEL_BUFFER_SIZE;i = i + 1 )
+        begin
+            pixel_buffer[ i ] <= inter_data_out[ i ];
+        end
+    end
     else if ( h_scaling && reload_pixel_buffer == 1 )
     begin
         for ( i = 0;i < PIXEL_BUFFER_SIZE;i = i + 1 )
         begin
             pixel_buffer[ i ] <= ( h_rd_ram_ptr == 0 ) ? data_out_0[ i ] : data_out_1[ i ];
-        end
-    end
-    else if ( v_flag )
-    begin
-        for ( i = 0;i < PIXEL_BUFFER_SIZE;i = i + 1 )
-        begin
-            pixel_buffer[ i ] <= inter_data_out[ i ];
         end
     end
     else
@@ -2159,19 +2167,11 @@ begin
             pixel_buffer_head[ i ] <= 0;
         end
     end
-    else if ( state_n == H_STALL || state_c == H_STALL || state_n == V_STALL || state_c == V_STALL )
+    else if ( state_n == H_STALL || state_c == H_STALL || state_c == V_STALL )
     begin
         for ( i = 0;i < 6;i = i + 1 )
         begin
             pixel_buffer_head[ i ] <= pixel_buffer_head[ i ];
-        end
-    end
-    // modified
-    else if ( ~v_flag && reference_table_index == 0 && reload_pixel_buffer == 1 )
-    begin //reference_table_index=0 && reload_pixel_buffer is same
-        for ( i = 0;i < 6;i = i + 1 )
-        begin
-            pixel_buffer_head[ i ] <= pixel_buffer[ 26 + i ];
         end
     end
     else if ( v_preloading || v_scaling )
@@ -2179,6 +2179,13 @@ begin
         for ( i = 0;i < 6;i = i + 1 )
         begin
             pixel_buffer_head[ i ] <= inter_data_out[ 26 + i ];
+        end
+    end
+    else if ( ~v_flag && reference_table_index == 0 && reload_pixel_buffer == 1 )
+    begin //reference_table_index=0 && reload_pixel_buffer is same
+        for ( i = 0;i < 6;i = i + 1 )
+        begin
+            pixel_buffer_head[ i ] <= pixel_buffer[ 26 + i ];
         end
     end
     else
